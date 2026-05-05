@@ -6,28 +6,6 @@ from pathlib import Path
 from mpi4py import MPI
 
 
-def split_array(values, parts):
-    chunks = []
-    start = 0
-    base, extra = divmod(len(values), parts)
-    for index in range(parts):
-        chunk_size = base + (1 if index < extra else 0)
-        chunks.append(values[start : start + chunk_size])
-        start += chunk_size
-    return chunks
-
-
-def make_initial_state(length, mode, seed):
-    if mode == "single":
-        state = [0] * length
-        state[length // 2] = 1
-        return state
-    if mode == "alternating":
-        return [index % 2 for index in range(length)]
-    rng = random.Random(seed)
-    return [rng.randint(0, 1) for _ in range(length)]
-
-
 def parse_rule(spec):
     spec = spec.strip()
 
@@ -78,10 +56,18 @@ def exchange_ghosts(comm, local_state, boundary, constant_value):
         right_rank = rank + 1 if rank < size - 1 else MPI.PROC_NULL
 
     left_ghost = comm.sendrecv(
-        sendobj=local_state[-1], dest=right_rank, sendtag=10, source=left_rank, recvtag=10
+        sendobj=local_state[-1],
+        dest=right_rank,
+        sendtag=10,
+        source=left_rank,
+        recvtag=10,
     )
     right_ghost = comm.sendrecv(
-        sendobj=local_state[0], dest=left_rank, sendtag=11, source=right_rank, recvtag=11
+        sendobj=local_state[0],
+        dest=left_rank,
+        sendtag=11,
+        source=right_rank,
+        recvtag=11,
     )
 
     if left_ghost is None:
@@ -91,13 +77,37 @@ def exchange_ghosts(comm, local_state, boundary, constant_value):
     return left_ghost, right_ghost
 
 
-def run_steps(comm, length, steps, rule, boundary, initial_mode, seed, constant_value, collect_history):
+def run_steps(
+    comm,
+    length,
+    steps,
+    rule,
+    boundary,
+    initial_mode,
+    seed,
+    constant_value,
+    collect_history,
+):
     rank = comm.Get_rank()
     size = comm.Get_size()
 
     if rank == 0:
-        initial_state = make_initial_state(length, initial_mode, seed)
-        chunks = split_array(initial_state, size)
+        if initial_mode == "single":
+            initial_state = [0] * length
+            initial_state[length // 2] = 1
+        elif initial_mode == "alternating":
+            initial_state = [i % 2 for i in range(length)]
+        else:
+            rng = random.Random(seed)
+            initial_state = [rng.randint(0, 1) for _ in range(length)]
+
+        chunks = []
+        start = 0
+        base, extra = divmod(length, size)
+        for i in range(size):
+            chunk_size = base + (1 if i < extra else 0)
+            chunks.append(initial_state[start : start + chunk_size])
+            start += chunk_size
     else:
         chunks = None
 
@@ -113,11 +123,15 @@ def run_steps(comm, length, steps, rule, boundary, initial_mode, seed, constant_
     start_time = MPI.Wtime()
 
     for _ in range(steps):
-        left_ghost, right_ghost = exchange_ghosts(comm, local_state, boundary, constant_value)
+        left_ghost, right_ghost = exchange_ghosts(
+            comm, local_state, boundary, constant_value
+        )
         next_state = []
         for index, value in enumerate(local_state):
             left_value = left_ghost if index == 0 else local_state[index - 1]
-            right_value = right_ghost if index == len(local_state) - 1 else local_state[index + 1]
+            right_value = (
+                right_ghost if index == len(local_state) - 1 else local_state[index + 1]
+            )
             next_state.append(rule(left_value, value, right_value))
         local_state = next_state
 
@@ -131,30 +145,38 @@ def run_steps(comm, length, steps, rule, boundary, initial_mode, seed, constant_
     return history, elapsed
 
 
-def parse_args():
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=["run", "benchmark"])
     parser.add_argument("--length", type=int, required=True)
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--rule", default="30")
-    parser.add_argument("--boundary", choices=["periodic", "constant"], default="constant")
-    parser.add_argument("--initial", choices=["single", "alternating", "random"], default="single")
+    parser.add_argument(
+        "--boundary", choices=["periodic", "constant"], default="constant"
+    )
+    parser.add_argument(
+        "--initial", choices=["single", "alternating", "random"], default="single"
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--constant-value", type=int, choices=[0, 1], default=0)
     parser.add_argument("--output")
-    return parser.parse_args()
+    args = parser.parse_args()
 
-
-def main():
-    args = parse_args()
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     rule = parse_rule(args.rule)
 
     collect_history = args.command == "run"
     history, elapsed = run_steps(
-        comm, args.length, args.steps, rule, args.boundary,
-        args.initial, args.seed, args.constant_value, collect_history
+        comm,
+        args.length,
+        args.steps,
+        rule,
+        args.boundary,
+        args.initial,
+        args.seed,
+        args.constant_value,
+        collect_history,
     )
 
     if rank != 0 or elapsed is None:
@@ -171,10 +193,16 @@ def main():
             output_path = Path(args.output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with output_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["processes", "time_seconds"])
+                writer = csv.DictWriter(
+                    handle, fieldnames=["processes", "time_seconds"]
+                )
                 writer.writeheader()
-                writer.writerow({"processes": str(comm.Get_size()), "time_seconds": f"{elapsed:.6f}"})
-                
+                writer.writerow(
+                    {
+                        "processes": str(comm.Get_size()),
+                        "time_seconds": f"{elapsed:.6f}",
+                    }
+                )
         print(f"{comm.Get_size()} processes: {elapsed:.6f} s")
 
 

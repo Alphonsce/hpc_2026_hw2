@@ -11,21 +11,12 @@ def choose_next(rng, rank, size):
     return choice
 
 
-def parse_args():
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--passes", type=int, default=12)
     parser.add_argument("--seed", type=int, default=7)
-    return parser.parse_args()
+    args = parser.parse_args()
 
-
-def send_stop(comm, rank, size):
-    for other_rank in range(size):
-        if other_rank != rank:
-            comm.send({"stop": True}, dest=other_rank, tag=1)
-
-
-def main():
-    args = parse_args()
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
@@ -49,7 +40,9 @@ def main():
 
         if remaining == 0:
             print(f"Finished after {len(path) - 1} passes.")
-            send_stop(comm, rank, size)
+            for other_rank in range(size):
+                if other_rank != rank:
+                    comm.send({"stop": True}, dest=other_rank, tag=1)
             break
 
         next_rank = choose_next(rng, rank, size)

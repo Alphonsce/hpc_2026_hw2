@@ -5,27 +5,12 @@ from pathlib import Path
 from mpi4py import MPI
 
 
-DEFAULT_SIZES = "0,1,8,64,512,4096,32768,262144,1048576"
-
-
-def parse_sizes(text):
-    return [int(item.strip()) for item in text.split(",") if item.strip()]
-
-
 def iterations_for_size(size, base_iterations):
     if size <= 1024:
         return base_iterations
     if size <= 65536:
         return max(base_iterations // 4, 1)
     return max(base_iterations // 20, 1)
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--sizes", default=DEFAULT_SIZES)
-    parser.add_argument("--base-iterations", type=int, default=10000)
-    parser.add_argument("--output", default="results/ping_pong.csv")
-    return parser.parse_args()
 
 
 def run_benchmark(comm, message_size, iterations):
@@ -51,11 +36,16 @@ def run_benchmark(comm, message_size, iterations):
 
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sizes", default="0,1,8,64,512,4096,32768,262144,1048576")
+    parser.add_argument("--base-iterations", type=int, default=10000)
+    parser.add_argument("--output", default="results/ping_pong.csv")
+    args = parser.parse_args()
+
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
 
-    sizes = parse_sizes(args.sizes)
+    sizes = [int(s.strip()) for s in args.sizes.split(",") if s.strip()]
     rows = []
 
     for message_size in sizes:
