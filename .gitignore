@@ -205,3 +205,11 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+*.pdf
+
+table.png
+
+test_helpers.py
+
+homework.md
