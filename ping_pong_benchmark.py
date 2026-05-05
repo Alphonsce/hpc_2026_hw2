@@ -1,37 +1,38 @@
 import argparse
 import csv
+import os
 from pathlib import Path
-
 from mpi4py import MPI
 
 
-def iterations_for_size(size, base_iterations):
+def get_iters(size, base_iters):
+    # scale down iterations for huge messages so it doesn't take forever
     if size <= 1024:
-        return base_iterations
+        return base_iters
     if size <= 65536:
-        return max(base_iterations // 4, 1)
-    return max(base_iterations // 20, 1)
+        return max(base_iters // 4, 1)
+    return max(base_iters // 20, 1)
 
 
-def run_benchmark(comm, message_size, iterations):
+def run_bench(comm, msg_size, iters):
     rank = comm.Get_rank()
-    payload = b"x" * message_size
+    payload = b"x" * msg_size
 
     comm.Barrier()
-    start = MPI.Wtime()
+    start_t = MPI.Wtime()
 
     if rank == 0:
-        for _ in range(iterations):
+        for _ in range(iters):
             comm.ssend(payload, dest=1, tag=10)
             comm.recv(source=1, tag=11)
     elif rank == 1:
-        for _ in range(iterations):
-            received = comm.recv(source=0, tag=10)
-            comm.ssend(received, dest=0, tag=11)
+        for _ in range(iters):
+            data = comm.recv(source=0, tag=10)
+            comm.ssend(data, dest=0, tag=11)
 
     comm.Barrier()
     if rank == 0:
-        return MPI.Wtime() - start
+        return MPI.Wtime() - start_t
     return None
 
 
@@ -45,41 +46,38 @@ def main():
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
 
+    # parse sizes
     sizes = [int(s.strip()) for s in args.sizes.split(",") if s.strip()]
-    rows = []
+    results = []
 
-    for message_size in sizes:
-        iterations = iterations_for_size(message_size, args.base_iterations)
-        elapsed = run_benchmark(comm, message_size, iterations)
+    for size in sizes:
+        iters = get_iters(size, args.base_iterations)
+        elapsed = run_bench(comm, size, iters)
 
         if rank == 0 and elapsed is not None:
-            messages = 2 * iterations
-            time_per_message = elapsed / messages
-            if message_size == 0:
-                bandwidth = 0.0
-            else:
-                bandwidth = (message_size / 1_000_000.0) / time_per_message
+            total_msgs = 2 * iters
+            t_per_msg = elapsed / total_msgs
+            
+            bw = 0.0
+            if size > 0:
+                bw = (size / 1_000_000.0) / t_per_msg
 
-            rows.append(
-                {
-                    "size_bytes": str(message_size),
-                    "iterations": str(iterations),
-                    "total_time_seconds": f"{elapsed:.6f}",
-                    "time_per_message_seconds": f"{time_per_message:.9f}",
-                    "bandwidth_mb_s": f"{bandwidth:.6f}",
-                }
-            )
-            print(
-                f"{message_size:>8} bytes, {iterations:>6} iterations, "
-                f"{time_per_message:.9f} s/message"
-            )
+            results.append({
+                "size_bytes": str(size),
+                "iterations": str(iters),
+                "total_time_seconds": f"{elapsed:.6f}",
+                "time_per_message_seconds": f"{t_per_msg:.9f}",
+                "bandwidth_mb_s": f"{bw:.6f}",
+            })
+            print(f"{size:>8} bytes, {iters:>6} iterations, {t_per_msg:.9f} s/message")
 
     if rank == 0:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open("w", newline="", encoding="utf-8") as handle:
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(out_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(
-                handle,
+                f,
                 fieldnames=[
                     "size_bytes",
                     "iterations",
@@ -89,7 +87,7 @@ def main():
                 ],
             )
             writer.writeheader()
-            writer.writerows(rows)
+            writer.writerows(results)
 
 
 if __name__ == "__main__":

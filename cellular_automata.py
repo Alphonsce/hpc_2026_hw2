@@ -1,6 +1,7 @@
 import argparse
 import csv
 import random
+import os
 from pathlib import Path
 
 from mpi4py import MPI
@@ -10,21 +11,23 @@ def parse_rule(spec):
     spec = spec.strip()
 
     if spec.isdigit():
-        rule_number = int(spec)
+        rule_num = int(spec)
 
         def wolfram_rule(left, center, right):
-            index = (left << 2) | (center << 1) | right
-            return (rule_number >> index) & 1
+            # magic bitwise stuff to get the wolfram rule output
+            idx = (left << 2) | (center << 1) | right
+            return (rule_num >> idx) & 1
 
         return wolfram_rule
 
+    # explicit mapping
     mapping = {}
     for part in spec.split(","):
         item = part.strip()
         if not item:
             continue
-        pattern, value = item.split(":", 1)
-        mapping[pattern.strip()] = int(value.strip())
+        pattern, val = item.split(":", 1)
+        mapping[pattern.strip()] = int(val.strip())
 
     def explicit_rule(left, center, right):
         return mapping[f"{left}{center}{right}"]
@@ -32,49 +35,53 @@ def parse_rule(spec):
     return explicit_rule
 
 
-def flatten_chunks(chunks):
-    flattened = []
-    for chunk in chunks:
-        flattened.extend(chunk)
-    return flattened
+def flatten(chunks):
+    res = []
+    for c in chunks:
+        res.extend(c)
+    return res
 
 
-def exchange_ghosts(comm, local_state, boundary, constant_value):
+def exchange_ghosts(comm, local_state, boundary, const_val):
     rank = comm.Get_rank()
     size = comm.Get_size()
 
     if size == 1:
         if boundary == "periodic":
             return local_state[-1], local_state[0]
-        return constant_value, constant_value
+        return const_val, const_val
 
     if boundary == "periodic":
-        left_rank = (rank - 1) % size
-        right_rank = (rank + 1) % size
+        left_r = (rank - 1) % size
+        right_r = (rank + 1) % size
     else:
-        left_rank = rank - 1 if rank > 0 else MPI.PROC_NULL
-        right_rank = rank + 1 if rank < size - 1 else MPI.PROC_NULL
+        left_r = rank - 1 if rank > 0 else MPI.PROC_NULL
+        right_r = rank + 1 if rank < size - 1 else MPI.PROC_NULL
 
-    left_ghost = comm.sendrecv(
+    # send left, recv right
+    ghost_l = comm.sendrecv(
         sendobj=local_state[-1],
-        dest=right_rank,
+        dest=right_r,
         sendtag=10,
-        source=left_rank,
+        source=left_r,
         recvtag=10,
     )
-    right_ghost = comm.sendrecv(
+    
+    # send right, recv left
+    ghost_r = comm.sendrecv(
         sendobj=local_state[0],
-        dest=left_rank,
+        dest=left_r,
         sendtag=11,
-        source=right_rank,
+        source=right_r,
         recvtag=11,
     )
 
-    if left_ghost is None:
-        left_ghost = constant_value
-    if right_ghost is None:
-        right_ghost = constant_value
-    return left_ghost, right_ghost
+    if ghost_l is None:
+        ghost_l = const_val
+    if ghost_r is None:
+        ghost_r = const_val
+        
+    return ghost_l, ghost_r
 
 
 def run_steps(
@@ -85,63 +92,65 @@ def run_steps(
     boundary,
     initial_mode,
     seed,
-    constant_value,
-    collect_history,
+    const_val,
+    collect_hist,
 ):
     rank = comm.Get_rank()
     size = comm.Get_size()
 
     if rank == 0:
         if initial_mode == "single":
-            initial_state = [0] * length
-            initial_state[length // 2] = 1
+            init_state = [0] * length
+            init_state[length // 2] = 1
         elif initial_mode == "alternating":
-            initial_state = [i % 2 for i in range(length)]
+            init_state = [i % 2 for i in range(length)]
         else:
             rng = random.Random(seed)
-            initial_state = [rng.randint(0, 1) for _ in range(length)]
+            init_state = [rng.randint(0, 1) for _ in range(length)]
 
+        # split data for scatter
         chunks = []
         start = 0
         base, extra = divmod(length, size)
         for i in range(size):
-            chunk_size = base + (1 if i < extra else 0)
-            chunks.append(initial_state[start : start + chunk_size])
-            start += chunk_size
+            c_size = base + (1 if i < extra else 0)
+            chunks.append(init_state[start : start + c_size])
+            start += c_size
     else:
         chunks = None
 
     local_state = comm.scatter(chunks, root=0)
-    history = [] if (rank == 0 and collect_history) else None
+    history = [] if (rank == 0 and collect_hist) else None
 
-    if collect_history:
+    if collect_hist:
         gathered = comm.gather(local_state, root=0)
         if rank == 0:
-            history.append(flatten_chunks(gathered))
+            history.append(flatten(gathered))
 
     comm.Barrier()
-    start_time = MPI.Wtime()
+    t0 = MPI.Wtime()
 
     for _ in range(steps):
-        left_ghost, right_ghost = exchange_ghosts(
-            comm, local_state, boundary, constant_value
+        ghost_l, ghost_r = exchange_ghosts(
+            comm, local_state, boundary, const_val
         )
+        
         next_state = []
-        for index, value in enumerate(local_state):
-            left_value = left_ghost if index == 0 else local_state[index - 1]
-            right_value = (
-                right_ghost if index == len(local_state) - 1 else local_state[index + 1]
-            )
-            next_state.append(rule(left_value, value, right_value))
+        for i, val in enumerate(local_state):
+            l_val = ghost_l if i == 0 else local_state[i - 1]
+            r_val = ghost_r if i == len(local_state) - 1 else local_state[i + 1]
+            next_state.append(rule(l_val, val, r_val))
+            
         local_state = next_state
 
-        if collect_history:
+        if collect_hist:
             gathered = comm.gather(local_state, root=0)
             if rank == 0:
-                history.append(flatten_chunks(gathered))
+                history.append(flatten(gathered))
 
-    local_elapsed = MPI.Wtime() - start_time
-    elapsed = comm.reduce(local_elapsed, op=MPI.MAX, root=0)
+    local_time = MPI.Wtime() - t0
+    elapsed = comm.reduce(local_time, op=MPI.MAX, root=0)
+    
     return history, elapsed
 
 
@@ -151,12 +160,8 @@ def main():
     parser.add_argument("--length", type=int, required=True)
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--rule", default="30")
-    parser.add_argument(
-        "--boundary", choices=["periodic", "constant"], default="constant"
-    )
-    parser.add_argument(
-        "--initial", choices=["single", "alternating", "random"], default="single"
-    )
+    parser.add_argument("--boundary", choices=["periodic", "constant"], default="constant")
+    parser.add_argument("--initial", choices=["single", "alternating", "random"], default="single")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--constant-value", type=int, choices=[0, 1], default=0)
     parser.add_argument("--output")
@@ -166,7 +171,7 @@ def main():
     rank = comm.Get_rank()
     rule = parse_rule(args.rule)
 
-    collect_history = args.command == "run"
+    collect_hist = args.command == "run"
     history, elapsed = run_steps(
         comm,
         args.length,
@@ -176,33 +181,29 @@ def main():
         args.initial,
         args.seed,
         args.constant_value,
-        collect_history,
+        collect_hist,
     )
 
     if rank != 0 or elapsed is None:
         return
 
     if args.command == "run":
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open("w", newline="", encoding="utf-8") as handle:
-            csv.writer(handle).writerows(history or [])
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows(history or [])
         print(f"Saved {args.output}")
     else:
         if args.output:
-            output_path = Path(args.output)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with output_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(
-                    handle, fieldnames=["processes", "time_seconds"]
-                )
+            out_path = Path(args.output)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(out_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=["processes", "time_seconds"])
                 writer.writeheader()
-                writer.writerow(
-                    {
-                        "processes": str(comm.Get_size()),
-                        "time_seconds": f"{elapsed:.6f}",
-                    }
-                )
+                writer.writerow({
+                    "processes": str(comm.Get_size()),
+                    "time_seconds": f"{elapsed:.6f}",
+                })
         print(f"{comm.Get_size()} processes: {elapsed:.6f} s")
 
 

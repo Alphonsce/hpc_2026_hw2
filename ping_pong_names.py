@@ -1,10 +1,10 @@
 import argparse
 import random
-
 from mpi4py import MPI
 
 
 def choose_next(rng, rank, size):
+    # pick a random node that isn't us
     choice = rng.randrange(size - 1)
     if choice >= rank:
         choice += 1
@@ -21,33 +21,37 @@ def main():
     rank = comm.Get_rank()
     size = comm.Get_size()
 
+    # offset seed by rank so everyone gets different random numbers
     rng = random.Random(args.seed + rank)
 
     if rank == 0:
-        first_target = choose_next(rng, rank, size)
-        first_message = {"path": [0, first_target], "remaining": args.passes - 1}
-        print(f"0 -> {first_target}")
-        comm.ssend(first_message, dest=first_target, tag=0)
+        target = choose_next(rng, rank, size)
+        msg = {"path": [0, target], "remaining": args.passes - 1}
+        print(f"0 -> {target}")
+        comm.ssend(msg, dest=target, tag=0)
 
     while True:
-        message = comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG)
-        if message.get("stop"):
+        msg = comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG)
+        if msg.get("stop"):
             break
 
-        path = message["path"]
-        remaining = message["remaining"]
+        path = msg["path"]
+        rem = msg["remaining"]
+        
+        # print("DEBUG: got msg", path)
         print(" -> ".join(str(item) for item in path))
 
-        if remaining == 0:
+        if rem == 0:
             print(f"Finished after {len(path) - 1} passes.")
-            for other_rank in range(size):
-                if other_rank != rank:
-                    comm.send({"stop": True}, dest=other_rank, tag=1)
+            # tell everyone else to stop
+            for other in range(size):
+                if other != rank:
+                    comm.send({"stop": True}, dest=other, tag=1)
             break
 
         next_rank = choose_next(rng, rank, size)
-        next_message = {"path": path + [next_rank], "remaining": remaining - 1}
-        comm.ssend(next_message, dest=next_rank, tag=0)
+        next_msg = {"path": path + [next_rank], "remaining": rem - 1}
+        comm.ssend(next_msg, dest=next_rank, tag=0)
 
 
 if __name__ == "__main__":
